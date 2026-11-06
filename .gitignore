@@ -1,4 +1,6 @@
 # local files
+/.local/
+/exports/
 site/*
 local_tests/*
 .mcpregistry_*
