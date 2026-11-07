@@ -41,7 +41,7 @@ python -X utf8 tools/contractors_school/collect.py collect --cdp http://127.0.0.
 
 No browser is launched or security settings changed by the collector. Keep the school tab open and avoid taking another practice test in that same session during collection. Close the debug browser when finished.
 
-This creates practice-test attempts and submits the first option to reveal the site's feedback. **It changes practice-attempt history and scores.** It does not submit feedback forms or purchase anything. Video references are saved; video files are not downloaded.
+This opens or resumes each practice-test attempt, then ends it to read the full result review. The review exposes correct answers for answered and unanswered questions, so live collection does not submit answer choices. **It changes practice-attempt history and scores, and it ends any unfinished attempt for a collected topic.** An attempt with no answers has a zero score. It does not submit feedback forms or purchase anything. Video and image references are saved; media files are not downloaded.
 
 An HTTP-only alternative uses cookies from a current capture:
 
@@ -53,11 +53,11 @@ The supplied capture's HTTP session did not provide live access during verificat
 
 ## Resume and coverage
 
-Run the same command with the same output directory to resume. Completed topics are skipped. Interrupted topics restart a fresh attempt, merging already collected questions by subject, topic and question ID. The JSON checkpoint is saved after each successful answer; CSV is regenerated from it. A failed request is not automatically retried, avoiding duplicate submissions after ambiguous network failures. Exit code `2` means collection is incomplete; existing exports are preserved.
+Run the same command with the same output directory to resume. Completed topics are skipped. Interrupted topics open or resume the site's attempt and merge already collected questions by subject, topic and question ID. The JSON checkpoint is saved after each fully validated topic review; CSV is regenerated from it. Partial questions from imported captures are also preserved. Failed requests are not automatically retried. Exit code `2` means collection is incomplete; existing exports are preserved.
 
-Coverage is explicit for both subjects. A complete topic means one observed full attempt, with the declared number of questions and a terminal End Test link. It does **not** prove there are no unseen questions in a randomized question bank. Questions seen without answer feedback remain in JSON with `correct_answer: null`.
+Coverage is explicit for both subjects. A complete live topic means all unique question cards and correct answers from its review match the counts declared by both the topic-details page and the result page. Capture import can also mark a full observed attempt complete. This does **not** prove there are no unseen questions in a randomized question bank. Questions seen without answer feedback in a capture remain in JSON with `correct_answer: null`.
 
-Defaults: one second between requests, at most five hundred submissions per topic. Adjust with `--delay` and `--max-questions`. A limit, repeated question, missing answer marker, conflicting correct answer, unexpected terminal page, login redirect or challenge leaves the topic incomplete and stops collection.
+Defaults: one second between requests, at most five hundred declared questions per topic. Adjust with `--delay` and `--max-questions`. An over-limit topic stops before starting an attempt. Duplicate question IDs, missing answer markers, conflicting correct answers, mismatched review counts, login redirects or challenges leave the topic incomplete and stop collection.
 
 ## Verify
 
@@ -65,4 +65,4 @@ Defaults: one second between requests, at most five hundred submissions per topi
 python -X utf8 -m unittest discover -s tools/contractors_school/tests -v
 ```
 
-The suite covers extraction, answer correctness, image/video references, terminal HTML, malformed feedback, CSV safety, token exclusion, checkpoint limits, real mitmproxy file import and resuming across the two subjects. Browser fetching itself still needs verification against a current signed-in debug session.
+The suite covers extraction, answer correctness, image/video references, terminal HTML, malformed feedback, CSV safety, token exclusion, checkpoint limits, real mitmproxy file import, resuming across the two subjects and recovering previously answered questions from full reviews. Browser-backed fetching and full-review extraction have also been verified against a signed-in session.

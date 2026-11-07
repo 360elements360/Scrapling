@@ -41,6 +41,16 @@ TOPIC = {
 ROOT = "https://www.contractorsischool.com/customer/practice-tests"
 
 
+def review_card(qid="10"):
+    return f'''<div class="row"><div class="col-md-11">
+      <div class="question_div"><p>Review question {qid}</p></div>
+      <div class="custom-radio option_1"><input type="radio" name="answer1_{qid}" value="A"><label>Wrong choice</label></div>
+      <div class="custom-radio option_2"><img src="/assets/front/img/wbp/right.webp">
+        <input type="radio" name="answer2_{qid}" value="B"><label>Correct choice</label></div>
+      <div class="explanation"><p>Explanation:</p><p>Source explanation.</p></div>
+    </div></div>'''
+
+
 class CollectorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -118,40 +128,31 @@ class CollectorTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.m.validate_response(status, url, body)
 
-    def test_collector_refreshes_form_fields_and_stops_at_terminal_link(self):
-        m = self.m
-
-        class Site:
-            def __init__(self):
-                self.submissions = 0
-
-            def request(self, method, url, data=None):
-                if method == "GET":
-                    return '<span id="totalQuestionCount">2</span>' + fragment()
-                self.submissions += 1
-                expected = {"question_id": "10" if self.submissions == 1 else "20", "test_exam_id": "100" if self.submissions == 1 else "101", "_token": "csrf-one" if self.submissions == 1 else "csrf-two", "answer": "A"}
-                if data != expected:
-                    raise AssertionError(f"Incorrect submission fields: {list(data)}")
-                next_html = fragment("20", token="csrf-two", attempt="101") if self.submissions == 1 else '<a href="/customer/practice-tests/end-exam/topic-one">End Test</a>'
-                return json.dumps({"status": "success", "data": {"html": fragment(data["question_id"], feedback=True), "next_question_html": next_html, "total_questions": 2, "current_question_count": self.submissions + 1}})
-
-        with tempfile.TemporaryDirectory() as directory:
-            store = m.Store(Path(directory))
-            site = Site()
-            m.collect_topic(site, store, TOPIC, max_questions=3)
-            self.assertEqual(len(store.data["questions"]), 2)
-            self.assertEqual(store.data["topics"][0]["status"], "complete")
-            self.assertEqual(site.submissions, 2)
-
-    def test_question_limit_preserves_partial_results_without_claiming_complete(self):
+    def test_review_collection_rejects_incomplete_review_without_claiming_complete(self):
         class Site:
             def request(self, method, url, data=None):
-                if method == "GET":
+                if url == TOPIC["details_url"]:
+                    return '<p>Total Questions 2</p>'
+                if '/start-exam?' in url:
                     return fragment()
-                return json.dumps({"status": "success", "data": {"html": fragment(feedback=True), "next_question_html": fragment("20"), "total_questions": 2}})
+                return '<p>Total Questions 2</p>' + review_card()
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.m.Store(Path(directory))
+            with self.assertRaises(ValueError):
+                self.m.collect_topic(Site(), store, TOPIC, max_questions=3)
+            self.assertEqual(len(store.data["questions"]), 0)
+            self.assertNotEqual(store.data["topics"][0]["status"], "complete")
+
+    def test_question_limit_preserves_existing_data_without_starting_attempt(self):
+        class Site:
+            def request(self, method, url, data=None):
+                if url != TOPIC["details_url"]:
+                    raise AssertionError("An over-limit topic must not start a practice attempt")
+                return '<p>Total Questions 2</p>'
 
         with tempfile.TemporaryDirectory() as directory:
             store = self.m.Store(Path(directory))
+            store.add(self.m.parse_question(fragment(feedback=True), feedback=True)["question"], TOPIC)
             with self.assertRaises(ValueError):
                 self.m.collect_topic(Site(), store, TOPIC, max_questions=1)
             saved = json.loads((Path(directory) / "questions.json").read_text(encoding="utf-8"))
@@ -195,8 +196,12 @@ class CollectorTests(unittest.TestCase):
                     return '<a href="/customer/practice-tests/exam-details?tital_id=topic-one&cat_id=law">Business Organization</a>'
                 if url == ROOT + "/exams?p=electric&q=y":
                     return '<a href="/customer/practice-tests/exam-details?tital_id=topic-two&cat_id=electric">Wiring</a>'
+                if method == "GET" and url == ROOT + "/exam-details?tital_id=topic-two&cat_id=electric":
+                    return '<p>Total Questions 1</p>'
                 if method == "GET" and url == ROOT + "/start-exam?tital_id=topic-two":
                     return fragment("20")
+                if method == "GET" and url == ROOT + "/end-exam/topic-two":
+                    return '<p>Total Questions 1</p>' + review_card("20")
                 if method == "POST" and url == ROOT + "/submit-exam-question/topic-two" and data["question_id"] == "20":
                     return json.dumps({"status": "success", "data": {"html": fragment("20", feedback=True), "next_question_html": '<a href="/customer/practice-tests/end-exam/topic-two">End Test</a>', "total_questions": 1}})
                 raise AssertionError("Unexpected request: " + method + " " + url)
@@ -209,6 +214,43 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(self.m.collect_all(Site(), store, 3), 0)
             self.assertEqual([c["questions"] for c in store.data["coverage"]], [1, 1])
             self.assertTrue(all(t["status"] == "complete" for t in store.data["topics"]))
+
+    def test_review_extracts_unanswered_questions_by_radio_name_ids(self):
+        questions = self.m.parse_review_questions(review_card("10") + review_card("20"))
+        self.assertEqual([q["question_id"] for q in questions], ["10", "20"])
+        self.assertEqual([q["correct_answer"] for q in questions], ["B", "B"])
+        self.assertEqual(questions[0]["explanation"], "Source explanation.")
+
+    def test_review_rejects_missing_answers_duplicate_or_inconsistent_ids(self):
+        cases = [
+            review_card().replace('/assets/front/img/wbp/right.webp', '/wrong.webp'),
+            review_card() + review_card(),
+            review_card().replace('answer2_10', 'answer2_20'),
+        ]
+        for content in cases:
+            with self.subTest(content=content[:40]):
+                with self.assertRaises(ValueError):
+                    self.m.parse_review_questions(content)
+
+    def test_review_collection_recovers_previously_answered_questions_without_posts(self):
+        class Site:
+            def request(self, method, url, data=None):
+                if method != "GET":
+                    raise AssertionError("Review collection must not submit answers")
+                if url == TOPIC["details_url"]:
+                    return '<p>Total Questions 2</p>'
+                if url == ROOT + '/start-exam?tital_id=topic-one':
+                    return fragment("20")  # The server resumed with question 10 already answered.
+                if url == ROOT + '/end-exam/topic-one':
+                    return '<p>Total Questions 2</p>' + review_card("10") + review_card("20")
+                raise AssertionError("Unexpected request: " + url)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.m.Store(Path(directory))
+            self.m.collect_topic(Site(), store, TOPIC, max_questions=5)
+            self.assertEqual(len(store.data["questions"]), 2)
+            self.assertEqual(store.data["topics"][0]["status"], "complete")
+            self.assertEqual(store.data["topics"][0]["collection_method"], "exam_review")
 
     def test_network_errors_do_not_expose_transport_details(self):
         class Session:

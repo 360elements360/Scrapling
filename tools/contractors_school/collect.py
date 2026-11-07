@@ -118,6 +118,48 @@ def parse_question(html, feedback=False):
     return {"question": result, "form": form}
 
 
+def declared_total(html):
+    plain = text_of(soup(html))
+    match = re.search(r"Total Questions\s+(\d+)|Total Question\s*:\s*(\d+)", plain)
+    if match is None:
+        raise ValueError("Page does not declare its question count")
+    return int(next(value for value in match.groups() if value is not None))
+
+
+def parse_review_questions(html):
+    doc = soup(html)
+    questions, seen = [], set()
+    for question in doc.select(".question_div"):
+        card = question.parent
+        while card is not None and len(card.select(".question_div")) == 1 and not card.select('input[type="radio"]'):
+            card = card.parent
+        if card is None or len(card.select(".question_div")) != 1:
+            raise ValueError("Could not isolate a review question card")
+        copy = soup(str(card))
+        radios = copy.select('input[type="radio"]')
+        ids = set()
+        for radio in radios:
+            match = re.fullmatch(r"answer\d+_(\d+)", radio.get("name", ""))
+            if match is None:
+                raise ValueError("Review radio name lacks a question ID")
+            ids.add(match[1])
+            radio["name"] = "answer"
+        if len(ids) != 1:
+            raise ValueError("Review choices have inconsistent question IDs")
+        ident = ids.pop()
+        if ident in seen:
+            raise ValueError("Duplicate question in review")
+        seen.add(ident)
+        copy.insert(0, copy.new_tag("input", attrs={"name": "question_id", "value": ident}))
+        parsed = parse_question(str(copy), feedback=True)
+        if parsed is None:
+            raise ValueError("Review card contains no question")
+        questions.append(parsed["question"])
+    if not questions:
+        raise ValueError("Review contains no questions")
+    return questions
+
+
 class Store:
     """The JSON export is the checkpoint; CSV is regenerated from it."""
 
@@ -158,7 +200,7 @@ class Store:
     def save(self):
         self.output.mkdir(parents=True, exist_ok=True)
         self.data["updated_at"] = datetime.now(timezone.utc).isoformat()
-        self.data["coverage_note"] = "Complete means one observed full attempt for that topic; unseen randomized questions may exist."
+        self.data["coverage_note"] = "Complete means all declared questions were observed in a captured attempt or full review; unseen randomized questions may exist."
         self.data["coverage"] = []
         for subject in SUBJECTS:
             topics = [t for t in self.data["topics"] if t["subject"] == subject]
@@ -373,45 +415,28 @@ def collect_topic(transport, store, topic, max_questions=500):
     progress["status"] = "in_progress"
     progress.pop("error", None)
     store.save()
+    expected = declared_total(transport.request("GET", topic["details_url"]))
+    progress["expected_questions"] = expected
+    if expected < 1 or expected > max_questions:
+        store.save()
+        raise ValueError("Topic question count is outside the configured limit; existing answers are preserved")
     start_url = ROOT + "/start-exam?" + urlencode({"tital_id": topic["id"]})
     page = parse_question(transport.request("GET", start_url))
     if page is None:
         raise ValueError("Start page contains no question; session or access may have expired")
-    seen = set()
-    for _ in range(max_questions):
-        fields = page["form"]
-        ident = fields.get("question_id")
-        if ident in seen:
-            raise ValueError("Repeated question within one attempt; stopped rather than looping")
-        if not all(fields.get(name) for name in ("_token", "test_exam_id", "question_id")):
-            raise ValueError("Question form lacks a CSRF token or attempt ID")
-        # These are practice attempts: submitting an arbitrary option reveals the feedback.
-        payload = dict(fields, answer=page["question"]["options"][0]["key"])
-        url = ROOT + "/submit-exam-question/" + topic["id"]
-        response = json.loads(transport.request("POST", url, payload))
-        if response.get("status") != "success":
-            raise ValueError("Site rejected the practice-question submission")
-        data = response["data"]
-        feedback = parse_question(data.get("html", ""), feedback=True)
-        if feedback is None or feedback["form"]["question_id"] != ident:
-            raise ValueError("Feedback does not match the submitted question")
-        store.add(feedback["question"], topic)
-        seen.add(ident)
-        expected = int(data["total_questions"])
-        progress["expected_questions"] = expected
-        progress["last_attempt_answered"] = len(seen)
-        next_html = data.get("next_question_html", "")
-        next_page = parse_question(next_html)
-        if next_page is None:
-            if not terminal_link(next_html) or len(seen) != expected:
-                store.save()
-                raise ValueError("Attempt ended without matching its declared question count")
-            progress["status"] = "complete"
-            store.save()
-            return
+    # Starting can resume an older attempt. Its review includes both earlier answers
+    # and unanswered questions, so completeness must be checked against the review.
+    review = transport.request("GET", ROOT + "/end-exam/" + topic["id"])
+    questions = parse_review_questions(review)
+    if declared_total(review) != expected or len(questions) != expected:
         store.save()
-        page = next_page
-    raise ValueError("Question limit reached; partial answers are saved and topic remains incomplete")
+        raise ValueError("Review does not match the topic's declared question count")
+    for question in questions:
+        store.add(question, topic)
+    progress["review_questions"] = len(questions)
+    progress["collection_method"] = "exam_review"
+    progress["status"] = "complete"
+    store.save()
 
 
 def collect_all(transport, store, max_questions):
@@ -440,7 +465,7 @@ def collect_all(transport, store, max_questions):
             print("Stopped topic: " + str(error), file=sys.stderr, flush=True)
             # An auth/block response must not trigger retries across every remaining topic.
             break
-        print("Saved: " + str(topic["last_attempt_answered"]) + " answers", flush=True)
+        print("Saved: " + str(topic["review_questions"]) + " reviewed questions", flush=True)
     return failures
 
 
