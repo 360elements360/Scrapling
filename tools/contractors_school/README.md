@@ -66,3 +66,25 @@ python -X utf8 -m unittest discover -s tools/contractors_school/tests -v
 ```
 
 The suite covers extraction, answer correctness, image/video references, terminal HTML, malformed feedback, CSV safety, token exclusion, checkpoint limits, real mitmproxy file import, resuming across the two subjects and recovering previously answered questions from full reviews. Browser-backed fetching and full-review extraction have also been verified against a signed-in session.
+
+## Reading, audio and resources
+
+With the same signed-in browser open:
+
+```powershell
+python -X utf8 tools/contractors_school/materials.py --cdp http://127.0.0.1:9333
+```
+
+The collector discovers all available Reading Course, Audio Course and Resources entries. It includes the shared Math & Safety Review alongside Law & Business and C10 Electrical Contractor. It saves content under `exports/contractors-school/materials/`:
+
+- `index.html`: a local index linking to reading books, audio playlists, PDF resources and the question exports.
+- `reading/`: individual lessons and combined course books as HTML and text. Diagrams are downloaded under `assets/` and image links rewritten for offline use.
+- `audio/`: actual MP3 files, a local track listing and a playlist per course for an audio player.
+- `resources/`: the PDF files linked by the site.
+- `manifest.json`: source URLs, status, sizes, SHA-256 hashes, audio durations and PDF page counts.
+
+Run the same command again to resume. Existing files must match their recorded hash and size before being skipped. Reading extraction removes account navigation, forms, scripts and event handlers. It reads only the three course sections, preserving the practice-test tool's original request scope by default.
+
+Authenticated HTML is fetched inside Chrome. Public S3 audio and images are downloaded directly with no browser cookies and without inheriting proxy environment settings. Resource PDFs rejected or timed out by ordinary HTTP clients can use Chrome's `Network.loadNetworkResource` and streamed `IO.read`; external resources do not receive the school session's cookies. No proxy is configured by the collector.
+
+Downloads use temporary files and are published only after format validation. The collector checks PDF page counts, playable MP3 duration, image validity and response byte counts. Defaults are four download workers, one second between course-page requests and a 512 MiB limit per file. Adjust with `--workers`, `--delay` and `--max-file-mb`. Transient course-page HTTP 403 responses receive at most three GET attempts with a short delay; other failures remain explicit. A nonzero exit means some materials are incomplete, with verified files preserved for the next run.

@@ -29,13 +29,14 @@ def text_of(node):
     return " ".join(node.get_text(" ", strip=True).split()) if node else ""
 
 
-def safe_url(url):
+def safe_url(url, allowed_paths=None):
     absolute = urljoin(ORIGIN, url)
     parts = urlsplit(absolute)
     if parts.scheme != "https" or parts.netloc != "www.contractorsischool.com":
         raise ValueError("Refusing a request outside the school website")
-    if not (parts.path == "/customer/practice-tests" or parts.path.startswith("/customer/practice-tests/")):
-        raise ValueError("Refusing a request outside the practice-test section")
+    paths = allowed_paths or ("/customer/practice-tests",)
+    if not any(parts.path == path.rstrip("/") or parts.path.startswith(path.rstrip("/") + "/") for path in paths):
+        raise ValueError("Refusing a request outside the permitted course sections")
     return absolute
 
 
@@ -313,11 +314,11 @@ def terminal_link(html):
     return None
 
 
-def validate_response(status, url, body):
+def validate_response(status, url, body, allowed_paths=None):
     if status != 200:
         raise ValueError(f"Website returned HTTP {status}; use a current signed-in browser session")
     try:
-        safe_url(url)
+        safe_url(url, allowed_paths)
     except ValueError:
         raise ValueError("Website redirected outside the signed-in practice tests; sign in again") from None
     if re.search(r"<title[^>]*>\s*Just a moment", body, re.I):
@@ -358,7 +359,7 @@ class HttpTransport:
 class BrowserTransport:
     """Use fetch inside an already-open, authenticated school tab, without copying cookies."""
 
-    def __init__(self, endpoint, delay):
+    def __init__(self, endpoint, delay, allowed_paths=None):
         import websocket
 
         parts = urlsplit(endpoint)
@@ -372,9 +373,28 @@ class BrowserTransport:
         self.socket = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=40, suppress_origin=True)
         self.ident = 0
         self.delay = delay
+        self.allowed_paths = allowed_paths
+
+    def call(self, method, params):
+        self.ident += 1
+        try:
+            self.socket.send(json.dumps({"id": self.ident, "method": method, "params": params}))
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                self.socket.settimeout(max(0.1, deadline - time.monotonic()))
+                message = json.loads(self.socket.recv())
+                if message.get("id") == self.ident:
+                    break
+            else:
+                raise TimeoutError
+        except Exception as error:
+            raise ValueError("Browser transport failed (" + type(error).__name__ + "); saved answers are preserved") from None
+        if "error" in message:
+            raise ValueError("Browser command failed: " + method)
+        return message.get("result", {})
 
     def request(self, method, url, data=None):
-        url = safe_url(url)
+        url = safe_url(url, self.allowed_paths)
         time.sleep(self.delay)
         args = json.dumps({"url": url, "method": method, "data": data})
         expression = """(async (args) => {
@@ -386,26 +406,13 @@ class BrowserTransport:
             const r = await fetch(args.url, options);
             return {status:r.status, url:r.url, text:await r.text()};
         })(""" + args + ")"
-        self.ident += 1
-        try:
-            self.socket.send(json.dumps({"id": self.ident, "method": "Runtime.evaluate", "params": {"expression": expression, "awaitPromise": True, "returnByValue": True}}))
-            deadline = time.monotonic() + 40
-            while time.monotonic() < deadline:
-                self.socket.settimeout(max(0.1, deadline - time.monotonic()))
-                message = json.loads(self.socket.recv())
-                if message.get("id") == self.ident:
-                    break
-            else:
-                raise TimeoutError
-        except Exception as error:
-            raise ValueError("Browser transport failed (" + type(error).__name__ + "); saved answers are preserved") from None
-        result = message.get("result", {})
-        if "error" in message or result.get("exceptionDetails"):
+        result = self.call("Runtime.evaluate", {"expression": expression, "awaitPromise": True, "returnByValue": True})
+        if result.get("exceptionDetails"):
             raise ValueError("Browser request failed; check the signed-in practice-test tab")
         response = result.get("result", {}).get("value")
         if not isinstance(response, dict):
             raise ValueError("Browser did not return a usable response")
-        return validate_response(response["status"], response["url"], response["text"])
+        return validate_response(response["status"], response["url"], response["text"], self.allowed_paths)
 
 
 def collect_topic(transport, store, topic, max_questions=500):
